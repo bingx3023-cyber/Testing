@@ -25,7 +25,7 @@ from telegram.ext import (
 # CONFIG
 # =========================
 
-TOKEN = "PUT_NEW_BOT_TOKEN"
+TOKEN = "7656448308:AAEPkCNpBtiiw70r-pKuFPdWo6StZnBTeEE"
 
 ADMIN_ID = 123456789
 
