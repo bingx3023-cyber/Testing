@@ -1,6 +1,45 @@
 import sqlite3
 import random
 import string
+import asyncio
+
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove
+)
+
+from telegram.ext import (
+    Application,
+    CommandHandler,
+    CallbackQueryHandler,
+    MessageHandler,
+    ContextTypes,
+    filters
+)
+
+# =========================
+# CONFIG
+# =========================
+
+TOKEN = "PUT_NEW_BOT_TOKEN"
+
+ADMIN_ID = 123456789
+
+FORCE_CHANNEL = "@h4x_top"
+
+CARD_NUMBER = "6037991234567890"
+
+FREE_TEST_CONFIG = "vmess://test-config"
+
+SAMPLE_CONFIG = "vmess://your-config"
+
+import sqlite3
+import random
+import string
 from telegram import (
     Update,
     InlineKeyboardButton,
@@ -253,9 +292,12 @@ def save_screenshot(user_id, file_id):
     c.execute('''
     UPDATE orders
     SET screenshot=?
-    WHERE user_id=?
-    ORDER BY id DESC
-    LIMIT 1
+    WHERE id=(
+        SELECT id FROM orders
+        WHERE user_id=?
+        ORDER BY id DESC
+        LIMIT 1
+    )
     ''', (file_id, user_id))
 
     conn.commit()
@@ -366,8 +408,11 @@ async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await query.answer("❌ هنوز عضو نشدی", show_alert=True)
 
     elif query.data == "buy":
-        await query.message.reply_text(
-            "📦 حجم را انتخاب کن",
+        if not await is_member(query.bot, user_id):
+            await query.message.reply_text("❌ ابتدا عضو کانال شوید")
+            return
+
+        await query.message.reply_text("📦 حجم را انتخاب کن",
             reply_markup=volume_menu()
         )
 
@@ -538,9 +583,10 @@ async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "✅ اسکرین شات ثبت شد. منتظر تایید ادمین باشید."
         )
 
-        await context.bot.send_message(
+        await context.bot.send_photo(
             ADMIN_ID,
-            f"📥 اسکرین شات جدید از کاربر {user_id}"
+            photo=photo,
+            caption=f"📥 اسکرین شات جدید از کاربر {user_id}"
         )
 
         return
@@ -603,8 +649,13 @@ async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # =========================
 
 
-def main():
-    app = Application.builder().token(TOKEN).build()
+async def main():
+    app = (
+        Application.builder()
+        .token(TOKEN)
+        .concurrent_updates(True)
+        .build()
+    )
 
     app.add_handler(CommandHandler("start", start))
     app.add_handler(CommandHandler("admin", admin))
@@ -619,8 +670,13 @@ def main():
 
     print("BOT STARTED")
 
-    app.run_polling()
+    await app.initialize()
+    await app.start()
+    await app.updater.start_polling(drop_pending_updates=True)
+
+    while True:
+        await asyncio.sleep(3600)
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
