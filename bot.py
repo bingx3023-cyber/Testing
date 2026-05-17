@@ -57,7 +57,7 @@ from telegram.ext import (
     filters
 )
 
-TOKEN = "YOUR_NEW_BOT_TOKEN"
+TOKEN = "7656448308:AAEPkCNpBtiiw70r-pKuFPdWo6StZnBTeEE"
 ADMIN_PASSWORD = "1390"
 ADMIN_ID = 123456789
 FORCE_CHANNEL = "@h4x_top"
