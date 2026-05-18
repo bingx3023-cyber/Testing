@@ -1,2028 +1,508 @@
 import sqlite3
 import random
-import string
-import asyncio
-
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    KeyboardButton,
+import os
+from pyrogram import Client, filters
+from pyrogram.types import (
     ReplyKeyboardMarkup,
-    ReplyKeyboardRemove
-)
-
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    CallbackQueryHandler,
-    MessageHandler,
-    ContextTypes,
-    filters
-)
-
-# =========================
-# CONFIG
-# =========================
-
-TOKEN = "7656448308:AAEPkCNpBtiiw70r-pKuFPdWo6StZnBTeEE"
-
-ADMIN_ID = 123456789
-
-FORCE_CHANNEL = "@h4x_top"
-
-CARD_NUMBER = "6037991234567890"
-
-FREE_TEST_CONFIG = "vmess://test-config"
-
-SAMPLE_CONFIG = "vmess://your-config"
-
-import sqlite3
-import random
-import string
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
     KeyboardButton,
-    ReplyKeyboardMarkup
+    InlineKeyboardMarkup,
+    InlineKeyboardButton
 )
 
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    CallbackQueryHandler,
-    MessageHandler,
-    ContextTypes,
-    filters
-)
+API_ID = 123456
+API_HASH = "API_HASH"
+BOT_TOKEN = "BOT_TOKEN"
 
-TOKEN = "7656448308:AAEPkCNpBtiiw70r-pKuFPdWo6StZnBTeEE"
 ADMIN_PASSWORD = "1390"
-ADMIN_ID = 123456789
-FORCE_CHANNEL = "@h4x_top"
+FORCE_CHANNEL = "h4x_top"
 CARD_NUMBER = "6037991234567890"
+CARD_OWNER = "VPN SHOP"
+
+app = Client(
+    "vpnshopbot",
+    api_id=API_ID,
+    api_hash=API_HASH,
+    bot_token=BOT_TOKEN
+)
+
+conn = sqlite3.connect("data.db", check_same_thread=False)
+c = conn.cursor()
+
+c.execute("""
+CREATE TABLE IF NOT EXISTS users(
+    user_id INTEGER PRIMARY KEY,
+    phone TEXT,
+    invited_by INTEGER,
+    referrals INTEGER DEFAULT 0,
+    banned INTEGER DEFAULT 0,
+    verified INTEGER DEFAULT 0
+)
+""")
+
+c.execute("""
+CREATE TABLE IF NOT EXISTS orders(
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER,
+    volume TEXT,
+    duration TEXT,
+    amount TEXT,
+    receipt_file_id TEXT,
+    status TEXT DEFAULT 'pending'
+)
+""")
+
+conn.commit()
+
+user_steps = {}
+admin_mode = {}
 
 
-# =========================
-# DATABASE
-# =========================
-
-def init_db():
-    conn = sqlite3.connect("bot.db")
-    c = conn.cursor()
-
-    c.execute('''
-    CREATE TABLE IF NOT EXISTS users (
-        user_id INTEGER PRIMARY KEY,
-        phone TEXT,
-        invited_by INTEGER,
-        referrals INTEGER DEFAULT 0,
-        verified INTEGER DEFAULT 0,
-        banned INTEGER DEFAULT 0
-    )
-    ''')
-
-    c.execute('''
-    CREATE TABLE IF NOT EXISTS orders (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        volume TEXT,
-        duration TEXT,
-        tracking_code TEXT,
-        amount TEXT,
-        screenshot TEXT,
-        payment_status TEXT DEFAULT 'pending',
-        config TEXT
-    )
-    ''')
-
-    conn.commit()
-    conn.close()
+# ---------------- UTIL ----------------
 
 
-init_db()
+def is_admin(user_id):
+    return user_id in admin_mode
 
 
-# =========================
-# HELPERS
-# =========================
-
-def connect_db():
-    return sqlite3.connect("bot.db")
-
-
-def generate_tracking_code():
-    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=10))
-
-
-def generate_random_amount():
-    base = 150000
-    random_part = random.randint(1000, 9999)
-    return f"{base}.{random_part}"
-
-
-async def is_member(bot, user_id):
+async def check_join(user_id):
     try:
-        member = await bot.get_chat_member(FORCE_CHANNEL, user_id)
-        return member.status in ['member', 'administrator', 'creator']
+        member = await app.get_chat_member(FORCE_CHANNEL, user_id)
+        return member.status in ["member", "administrator", "owner"]
     except:
         return False
 
 
-async def check_access(update: Update):
-    user_id = update.effective_user.id
+async def check_access(client, message):
+    user_id = message.from_user.id
 
-    if not await is_member(update.get_bot(), user_id):
-        keyboard = [
-            [InlineKeyboardButton("📢 عضویت در کانال", url=f"https://t.me/{FORCE_CHANNEL.replace('@', '')}")],
-            [InlineKeyboardButton("✅ بررسی عضویت", callback_data="check_join")]
-        ]
+    c.execute("SELECT banned, verified FROM users WHERE user_id=?", (user_id,))
+    user = c.fetchone()
 
-        await update.effective_message.reply_text(
-            "🚫 برای استفاده از ربات باید ابتدا عضو کانال شوید.",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-
+    if user and user[0] == 1:
+        await message.reply("شما بن شده‌اید")
         return False
 
-    conn = connect_db()
-    c = conn.cursor()
+    joined = await check_join(user_id)
 
-    c.execute("SELECT verified FROM users WHERE user_id=?", (user_id,))
-    row = c.fetchone()
-
-    conn.close()
-
-    if not row or row[0] == 0:
-        button = KeyboardButton("📱 تایید شماره", request_contact=True)
-
-        await update.effective_message.reply_text(
-            "📱 برای ادامه باید شماره تلفن خود را تایید کنید.",
-            reply_markup=ReplyKeyboardMarkup([[button]], resize_keyboard=True, one_time_keyboard=True)
+    if not joined:
+        kb = InlineKeyboardMarkup(
+            [[InlineKeyboardButton("عضویت در کانال", url=f"https://t.me/{FORCE_CHANNEL}")]]
         )
 
+        await message.reply(
+            "برای استفاده از ربات باید حتما داخل کانال عضو شوید",
+            reply_markup=kb
+        )
+        return False
+
+    if not user:
+        c.execute(
+            "INSERT OR IGNORE INTO users(user_id, verified) VALUES(?, 0)",
+            (user_id,)
+        )
+        conn.commit()
+
+    c.execute("SELECT verified FROM users WHERE user_id=?", (user_id,))
+    verified = c.fetchone()[0]
+
+    if verified == 0:
+        kb = ReplyKeyboardMarkup(
+            [[KeyboardButton("تایید شماره", request_contact=True)]],
+            resize_keyboard=True
+        )
+
+        await message.reply(
+            "برای فعال شدن ربات باید شماره خود را تایید کنید",
+            reply_markup=kb
+        )
         return False
 
     return True
 
 
-# =========================
-# MENUS
-# =========================
-
-def main_menu():
-    keyboard = [
-        [InlineKeyboardButton("📦 خرید سرویس", callback_data="buy")],
-        [InlineKeyboardButton("🎁 تست رایگان", callback_data="free_test")],
-        [InlineKeyboardButton("📊 پیگیری سفارش", callback_data="track")],
-        ]
-
-    return InlineKeyboardMarkup(keyboard)
+# ---------------- START ----------------
 
 
+@app.on_message(filters.command("start"))
+async def start(client, message):
+    user_id = message.from_user.id
 
-def volume_menu():
-    keyboard = [
-        [InlineKeyboardButton("10GB", callback_data="vol_10")],
-        [InlineKeyboardButton("50GB", callback_data="vol_50")],
-        [InlineKeyboardButton("100GB", callback_data="vol_100")],
-        [InlineKeyboardButton("Unlimited", callback_data="vol_unlimited")]
-    ]
-
-    return InlineKeyboardMarkup(keyboard)
-
-
-
-def duration_menu():
-    keyboard = [
-        [InlineKeyboardButton("1 Week", callback_data="dur_1week")],
-        [InlineKeyboardButton("1 Month", callback_data="dur_1month")],
-        [InlineKeyboardButton("1 Year", callback_data="dur_1year")],
-        [InlineKeyboardButton("Permanent", callback_data="dur_perm")]
-    ]
-
-    return InlineKeyboardMarkup(keyboard)
-
-
-# =========================
-# DATABASE ACTIONS
-# =========================
-
-def save_user(user_id, phone=None, invited_by=None):
-    conn = connect_db()
-    c = conn.cursor()
-
-    c.execute('''
-    INSERT OR IGNORE INTO users(user_id, invited_by)
-    VALUES(?, ?)
-    ''', (user_id, invited_by))
-
-    if phone:
-        c.execute('''
-        UPDATE users
-        SET phone=?, verified=1
-        WHERE user_id=?
-        ''', (phone, user_id))
-
-    conn.commit()
-    conn.close()
-
-
-
-def add_referral(inviter_id):
-    conn = connect_db()
-    c = conn.cursor()
-
-    c.execute('''
-    UPDATE users
-    SET referrals = referrals + 1
-    WHERE user_id=?
-    ''', (inviter_id,))
-
-    conn.commit()
-    conn.close()
-
-
-
-def get_referrals(user_id):
-    conn = connect_db()
-    c = conn.cursor()
-
-    c.execute("SELECT referrals FROM users WHERE user_id=?", (user_id,))
-    row = c.fetchone()
-
-    conn.close()
-
-    if row:
-        return row[0]
-
-    return 0
-
-
-
-def save_order(user_id, volume, duration, amount):
-    tracking_code = generate_tracking_code()
-
-    conn = connect_db()
-    c = conn.cursor()
-
-    c.execute('''
-    INSERT INTO orders(
-        user_id,
-        volume,
-        duration,
-        tracking_code,
-        amount
-    )
-    VALUES(?,?,?,?,?)
-    ''', (user_id, volume, duration, tracking_code, amount))
-
-    conn.commit()
-    conn.close()
-
-    return tracking_code
-
-
-
-def save_screenshot(user_id, file_id):
-    conn = connect_db()
-    c = conn.cursor()
-
-    c.execute('''
-    UPDATE orders
-    SET screenshot=?
-    WHERE id=(
-        SELECT id FROM orders
-        WHERE user_id=?
-        ORDER BY id DESC
-        LIMIT 1
-    )
-    ''', (file_id, user_id))
-
-    conn.commit()
-    conn.close()
-
-
-
-def get_orders():
-    conn = connect_db()
-    c = conn.cursor()
-
-    c.execute("SELECT * FROM orders ORDER BY id DESC")
-    rows = c.fetchall()
-
-    conn.close()
-
-    return rows
-
-
-
-def update_order(order_id, status, config=None):
-    conn = connect_db()
-    c = conn.cursor()
-
-    c.execute('''
-    UPDATE orders
-    SET payment_status=?, config=?
-    WHERE id=?
-    ''', (status, config, order_id))
-
-    conn.commit()
-    conn.close()
-
-
-# =========================
-# START
-# =========================
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
+    args = message.text.split()
 
     invited_by = None
 
-    if context.args:
+    if len(args) > 1:
         try:
-            invited_by = int(context.args[0])
+            invited_by = int(args[1])
         except:
             pass
 
-    save_user(user.id, invited_by=invited_by)
+    c.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
+    user = c.fetchone()
 
-    if not await check_access(update):
+    if not user:
+        c.execute(
+            "INSERT INTO users(user_id, invited_by) VALUES(?, ?)",
+            (user_id, invited_by)
+        )
+        conn.commit()
+
+    access = await check_access(client, message)
+
+    if not access:
         return
 
-    await update.message.reply_text(
-        "🌟 به ربات فروش VPN خوش اومدی",
-        reply_markup=main_menu()
+    kb = ReplyKeyboardMarkup(
+        [
+            ["خرید سرویس"],
+            ["تست رایگان"],
+            ["لینک رفرال من"]
+        ],
+        resize_keyboard=True
+    )
+
+    await message.reply(
+        "به فروشگاه VPN خوش آمدید",
+        reply_markup=kb
     )
 
 
-# =========================
-# CONTACT VERIFY
-# =========================
+# ---------------- CONTACT ----------------
 
-async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    contact = update.message.contact
-    user_id = update.effective_user.id
 
-    if contact.user_id != user_id:
-        await update.message.reply_text("❌ فقط شماره خودت را ارسال کن")
-        return
+@app.on_message(filters.contact)
+async def contact(client, message):
+    user_id = message.from_user.id
 
-    save_user(user_id, phone=contact.phone_number)
+    phone = message.contact.phone_number
 
-    conn = connect_db()
-    c = conn.cursor()
+    c.execute(
+        "UPDATE users SET phone=?, verified=1 WHERE user_id=?",
+        (phone, user_id)
+    )
+    conn.commit()
 
     c.execute("SELECT invited_by FROM users WHERE user_id=?", (user_id,))
-    row = c.fetchone()
+    inviter = c.fetchone()[0]
 
-    conn.close()
+    if inviter:
+        c.execute(
+            "UPDATE users SET referrals = referrals + 1 WHERE user_id=?",
+            (inviter,)
+        )
+        conn.commit()
 
-    if row and row[0]:
-        add_referral(row[0])
-
-    await update.message.reply_text(
-        "✅ شماره تایید شد. حالا میتونی از ربات استفاده کنی.",
-        reply_markup=ReplyKeyboardRemove()
+    kb = ReplyKeyboardMarkup(
+        [
+            ["خرید سرویس"],
+            ["تست رایگان"],
+            ["لینک رفرال من"]
+        ],
+        resize_keyboard=True
     )
 
-    await update.message.reply_text(
-        "🏠 منوی اصلی",
-        reply_markup=main_menu()
+    await message.reply(
+        "شماره تایید شد و ربات فعال شد",
+        reply_markup=kb
     )
 
 
-# =========================
-# BUTTONS
-# =========================
+# ---------------- REFERRAL ----------------
 
-async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
 
-    user_id = query.from_user.id
+@app.on_message(filters.regex("لینک رفرال من"))
+async def referral(client, message):
+    access = await check_access(client, message)
 
-    if query.data == "check_join":
-        if await is_member(query.bot, user_id):
-            await query.message.reply_text(
-                "✅ عضو شدی. حالا شماره تلفنتو تایید کن."
-            )
-        else:
-            await query.answer("❌ هنوز عضو نشدی", show_alert=True)
+    if not access:
+        return
 
-    elif query.data == "buy":
-        await query.edit_message_reply_markup(reply_markup=None)
-        if not await is_member(query.bot, user_id):
-            await query.message.reply_text("❌ ابتدا عضو کانال شوید")
+    user_id = message.from_user.id
+
+    bot_info = await app.get_me()
+
+    link = f"https://t.me/{bot_info.username}?start={user_id}"
+
+    txt = f"""
+برای دریافت تست رایگان ۵۰ مگ باید حداقل ۱۰ نفر را با لینک اختصاصی خود دعوت کنید.
+
+شرایط:
+- کاربر باید عضو کانال شود
+- شماره خود را تایید کند
+- فقط رفرال واقعی حساب می‌شود
+
+لینک اختصاصی شما:
+
+{link}
+"""
+
+    await message.reply(txt)
+
+
+# ---------------- FREE TEST ----------------
+
+
+@app.on_message(filters.regex("تست رایگان"))
+async def free_test(client, message):
+    access = await check_access(client, message)
+
+    if not access:
+        return
+
+    user_id = message.from_user.id
+
+    c.execute("SELECT referrals FROM users WHERE user_id=?", (user_id,))
+    refs = c.fetchone()[0]
+
+    if refs < 10:
+        await message.reply(
+            f"شما فعلا {refs} رفرال دارید و برای دریافت تست باید ۱۰ نفر دعوت کنید"
+        )
+        return
+
+    await message.reply(
+        "تست ۵۰ مگ شما:\n\nvmess://test-config"
+    )
+
+
+# ---------------- BUY ----------------
+
+
+@app.on_message(filters.regex("خرید سرویس"))
+async def buy(client, message):
+    access = await check_access(client, message)
+
+    if not access:
+        return
+
+    user_steps[message.from_user.id] = {
+        "step": "volume"
+    }
+
+    await message.reply("حجم سرویس را وارد کنید")
+
+
+@app.on_message(filters.text)
+async def text_handler(client, message):
+    user_id = message.from_user.id
+
+    if user_id in admin_mode:
+        if message.text.startswith("/ban"):
+            try:
+                uid = int(message.text.split()[1])
+
+                c.execute("UPDATE users SET banned=1 WHERE user_id=?", (uid,))
+                conn.commit()
+
+                await message.reply("کاربر بن شد")
+            except:
+                await message.reply("خطا")
             return
 
-        await query.message.reply_text("📦 حجم را انتخاب کن",
-            reply_markup=volume_menu()
-        )
+        if message.text.startswith("/unban"):
+            try:
+                uid = int(message.text.split()[1])
 
-    elif query.data.startswith("vol_"):
-        await query.edit_message_reply_markup(reply_markup=None)
-        context.user_data['volume'] = query.data.replace("vol_", "")
+                c.execute("UPDATE users SET banned=0 WHERE user_id=?", (uid,))
+                conn.commit()
 
-        await query.message.reply_text(
-            "⏰ زمان را انتخاب کن",
-            reply_markup=duration_menu()
-        )
-
-    elif query.data.startswith("dur_"):
-        await query.edit_message_reply_markup(reply_markup=None)
-        duration = query.data.replace("dur_", "")
-        volume = context.user_data.get("volume")
-
-        amount = generate_random_amount()
-
-        tracking = save_order(
-            user_id,
-            volume,
-            duration,
-            amount
-        )
-
-        text = f'''
-✅ سفارش ثبت شد
-
-🔢 کد پیگیری:
-{tracking}
-
-💳 شماره کارت:
-{CARD_NUMBER}
-
-💰 مبلغ دقیق:
-{amount}
-
-⚠️ دقیقا همین مبلغ را واریز کن.
-سپس اسکرین شات را همینجا ارسال کن.
-'''
-
-        await query.message.reply_text(text)
-
-    elif query.data == "track":
-        await query.edit_message_reply_markup(reply_markup=None)
-        context.user_data['awaiting_tracking'] = True
-
-        await query.message.reply_text(
-            "🔎 کد پیگیری سفارش را ارسال کن"
-        )
-
-    elif query.data == "free_test":
-        referrals = get_referrals(user_id)
-
-        referral_link = f"https://t.me/{context.bot.username}?start={user_id}"
-
-        text = f'''
-🎁 دریافت تست رایگان 50MB
-
-برای دریافت تست رایگان باید حداقل 10 نفر را با لینک اختصاصی خودت وارد ربات کنی.
-
-⚠️ کاربران باید:
-- عضو کانال شوند
-- شماره خود را تایید کنند
-- کامل وارد ربات شوند
-
-👥 تعداد رفرال فعلی: {referrals}/10
-
-🔗 لینک دعوت اختصاصی:
-{referral_link}
-'''
-
-        if referrals >= 10:
-            text += "\n\n✅ تبریک! تست رایگان فعال شد."
-
-        await query.message.reply_text(text)
-
-    elif query.data == "admin_orders":
-        if user_id != ADMIN_ID:
+                await message.reply("کاربر آن بن شد")
+            except:
+                await message.reply("خطا")
             return
 
-        orders = get_orders()
+        if message.text.startswith("/orders"):
+            c.execute("SELECT * FROM orders WHERE status='pending'")
+            orders = c.fetchall()
 
-        if not orders:
-            await query.message.reply_text("سفارشی وجود ندارد")
-            return
-
-        for order in orders:
-            text = f'''
-🆔 سفارش: {order[0]}
-👤 کاربر: {order[1]}
-📦 حجم: {order[2]}
-⏰ زمان: {order[3]}
-💰 مبلغ: {order[5]}
-📊 وضعیت: {order[7]}
-'''
-
-            if order[6]:
-                await query.message.reply_photo(
-                    photo=order[6],
-                    caption=text,
-                    reply_markup=InlineKeyboardMarkup([
-                        [
-                            InlineKeyboardButton(
-                                "✅ تایید",
-                                callback_data=f"approve_{order[0]}"
-                            ),
-                            InlineKeyboardButton(
-                                "❌ رد",
-                                callback_data=f"reject_{order[0]}"
-                            )
-                        ]
-                    ])
-                )
-            else:
-                await query.message.reply_text(text)
-
-    elif query.data.startswith("approve_"):
-        if user_id != ADMIN_ID:
-            return
-
-        order_id = int(query.data.split("_")[1])
-
-        context.user_data['send_to_order'] = order_id
-        context.user_data['approve_mode'] = True
-
-        await query.message.reply_text(
-            "✍️ حالا پیام دلخواهت را بفرست تا برای کاربر ارسال شود.\n\nمثلا کانفیگ یا متن تایید"
-        )
-
-    elif query.data.startswith("reject_"):
-        if user_id != ADMIN_ID:
-            return
-
-        order_id = int(query.data.split("_")[1])
-
-        context.user_data['send_to_order'] = order_id
-        context.user_data['reject_mode'] = True
-
-        await query.message.reply_text(
-            "✍️ متن رد سفارش را ارسال کن"
-        )
-
-
-# =========================
-# ADMIN PANEL
-# =========================
-
-async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-
-    if context.args:
-        if context.args[0] == "1390":
-            if user_id != ADMIN_ID:
-                await update.message.reply_text("❌ ادمین نیستی")
+            if not orders:
+                await message.reply("سفارشی نیست")
                 return
 
-            keyboard = [
-                [InlineKeyboardButton("📦 سفارشات", callback_data="admin_orders")]
-            ]
+            for order in orders:
+                oid = order[0]
+                uid = order[1]
+                volume = order[2]
+                duration = order[3]
+                amount = order[4]
+                receipt = order[5]
 
-            await update.message.reply_text(
-                "🎛 پنل مدیریت",
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
+                kb = InlineKeyboardMarkup([
+                    [
+                        InlineKeyboardButton("تایید", callback_data=f"approve_{oid}"),
+                        InlineKeyboardButton("رد", callback_data=f"reject_{oid}")
+                    ]
+                ])
 
+                await app.send_photo(
+                    chat_id=user_id,
+                    photo=receipt,
+                    caption=f"""
+ORDER #{oid}
+
+USER: {uid}
+VOLUME: {volume}
+TIME: {duration}
+AMOUNT: {amount}
+""",
+                    reply_markup=kb
+                )
             return
 
-    await update.message.reply_text("❌ استفاده: /admin 1390")
-
-    keyboard = [
-        [InlineKeyboardButton("📦 سفارشات", callback_data="admin_orders")]
-    ]
-
-    await update.message.reply_text(
-        "🎛 پنل مدیریت",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-
-# =========================
-# MESSAGE HANDLER
-# =========================
-
-async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-
-    if update.message.photo:
-        photo = update.message.photo[-1].file_id
-
-        save_screenshot(user_id, photo)
-
-        await update.message.reply_text(
-            "✅ اسکرین شات ثبت شد. منتظر تایید ادمین باشید."
-        )
-
-        await context.bot.send_photo(
-            ADMIN_ID,
-            photo=photo,
-            caption=f"📥 اسکرین شات جدید از کاربر {user_id}"
-        )
-
+    if user_id not in user_steps:
         return
 
-    if user_id == ADMIN_ID:
+    step = user_steps[user_id]["step"]
 
-        if context.user_data.get('approve_mode'):
-            order_id = context.user_data['send_to_order']
+    if step == "volume":
+        user_steps[user_id]["volume"] = message.text
+        user_steps[user_id]["step"] = "duration"
 
-            conn = connect_db()
-            c = conn.cursor()
+        await message.reply("مدت زمان سرویس را وارد کنید")
 
-            c.execute("SELECT user_id FROM orders WHERE id=?", (order_id,))
-            row = c.fetchone()
+    elif step == "duration":
+        user_steps[user_id]["duration"] = message.text
 
-            conn.close()
+        rand = random.randint(1000, 9999)
+        amount = f"150.{rand}"
 
-            if row:
-                target_user = row[0]
+        user_steps[user_id]["amount"] = amount
+        user_steps[user_id]["step"] = "receipt"
 
-                update_order(order_id, "approved", update.message.text)
+        await message.reply(
+            f"""
+مبلغ زیر را دقیقا واریز کنید:
 
-                await context.bot.send_message(
-                    target_user,
-                    f"✅ سفارش شما تایید شد\n\n{update.message.text}"
-                )
-
-                await update.message.reply_text("✅ ارسال شد")
-
-            context.user_data['approve_mode'] = False
-
-        elif context.user_data.get('reject_mode'):
-            order_id = context.user_data['send_to_order']
-
-            conn = connect_db()
-            c = conn.cursor()
-
-            c.execute("SELECT user_id FROM orders WHERE id=?", (order_id,))
-            row = c.fetchone()
-
-            conn.close()
-
-            if row:
-                target_user = row[0]
-
-                update_order(order_id, "rejected")
-
-                await context.bot.send_message(
-                    target_user,
-                    f"❌ سفارش شما رد شد\n\n{update.message.text}"
-                )
-
-                await update.message.reply_text("❌ پیام رد ارسال شد")
-
-            context.user_data['reject_mode'] = False
-
-
-# =========================
-# MAIN
-# =========================
-
-
-async def main():
-    app = (
-        Application.builder()
-        .token(TOKEN)
-        .concurrent_updates(True)
-        .build()
-    )
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("admin", admin))
-
-    app.add_handler(CallbackQueryHandler(buttons))
-
-    app.add_handler(MessageHandler(filters.CONTACT, contact_handler))
-
-    app.add_handler(MessageHandler(filters.PHOTO, messages))
-
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, messages))
-
-    print("BOT STARTED")
-
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling(drop_pending_updates=True)
-
-    while True:
-        await asyncio.sleep(3600)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
-SAMPLE_CONFIG = "vmess://your-config"
-
-import sqlite3
-import random
-import string
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    KeyboardButton,
-    ReplyKeyboardMarkup
-)
-
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    CallbackQueryHandler,
-    MessageHandler,
-    ContextTypes,
-    filters
-)
-
-TOKEN = "7656448308:AAEPkCNpBtiiw70r-pKuFPdWo6StZnBTeEE"
-ADMIN_PASSWORD = "1390"
-ADMIN_ID = 123456789
-FORCE_CHANNEL = "@h4x_top"
-CARD_NUMBER = "6037991234567890"
-
-
-# =========================
-# DATABASE
-# =========================
-
-def init_db():
-    conn = sqlite3.connect("bot.db")
-    c = conn.cursor()
-
-    c.execute('''
-    CREATE TABLE IF NOT EXISTS users (
-        user_id INTEGER PRIMARY KEY,
-        phone TEXT,
-        invited_by INTEGER,
-        referrals INTEGER DEFAULT 0,
-        verified INTEGER DEFAULT 0,
-        banned INTEGER DEFAULT 0
-    )
-    ''')
-
-    c.execute('''
-    CREATE TABLE IF NOT EXISTS orders (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        volume TEXT,
-        duration TEXT,
-        tracking_code TEXT,
-        amount TEXT,
-        screenshot TEXT,
-        payment_status TEXT DEFAULT 'pending',
-        config TEXT
-    )
-    ''')
-
-    conn.commit()
-    conn.close()
-
-
-init_db()
-
-
-# =========================
-# HELPERS
-# =========================
-
-def connect_db():
-    return sqlite3.connect("bot.db")
-
-
-def generate_tracking_code():
-    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=10))
-
-
-def generate_random_amount():
-    base = 150000
-    random_part = random.randint(1000, 9999)
-    return f"{base}.{random_part}"
-
-
-async def is_member(bot, user_id):
-    try:
-        member = await bot.get_chat_member(FORCE_CHANNEL, user_id)
-        return member.status in ['member', 'administrator', 'creator']
-    except:
-        return False
-
-
-async def check_access(update: Update):
-    user_id = update.effective_user.id
-
-    if not await is_member(update.get_bot(), user_id):
-        keyboard = [
-            [InlineKeyboardButton("📢 عضویت در کانال", url=f"https://t.me/{FORCE_CHANNEL.replace('@', '')}")],
-            [InlineKeyboardButton("✅ بررسی عضویت", callback_data="check_join")]
-        ]
-
-        await update.effective_message.reply_text(
-            "🚫 برای استفاده از ربات باید ابتدا عضو کانال شوید.",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-
-        return False
-
-    conn = connect_db()
-    c = conn.cursor()
-
-    c.execute("SELECT verified FROM users WHERE user_id=?", (user_id,))
-    row = c.fetchone()
-
-    conn.close()
-
-    if not row or row[0] == 0:
-        button = KeyboardButton("📱 تایید شماره", request_contact=True)
-
-        await update.effective_message.reply_text(
-            "📱 برای ادامه باید شماره تلفن خود را تایید کنید.",
-            reply_markup=ReplyKeyboardMarkup([[button]], resize_keyboard=True, one_time_keyboard=True)
-        )
-
-        return False
-
-    return True
-
-
-# =========================
-# MENUS
-# =========================
-
-def main_menu():
-    keyboard = [
-        [InlineKeyboardButton("📦 خرید سرویس", callback_data="buy")],
-        [InlineKeyboardButton("🎁 تست رایگان", callback_data="free_test")],
-        [InlineKeyboardButton("📊 پیگیری سفارش", callback_data="track")],
-        [InlineKeyboardButton("🎛 پنل مدیریت", callback_data="admin_panel")]
-    ]
-
-    return InlineKeyboardMarkup(keyboard)
-
-
-
-def volume_menu():
-    keyboard = [
-        [InlineKeyboardButton("10GB", callback_data="vol_10")],
-        [InlineKeyboardButton("50GB", callback_data="vol_50")],
-        [InlineKeyboardButton("100GB", callback_data="vol_100")],
-        [InlineKeyboardButton("Unlimited", callback_data="vol_unlimited")]
-    ]
-
-    return InlineKeyboardMarkup(keyboard)
-
-
-
-def duration_menu():
-    keyboard = [
-        [InlineKeyboardButton("1 Week", callback_data="dur_1week")],
-        [InlineKeyboardButton("1 Month", callback_data="dur_1month")],
-        [InlineKeyboardButton("1 Year", callback_data="dur_1year")],
-        [InlineKeyboardButton("Permanent", callback_data="dur_perm")]
-    ]
-
-    return InlineKeyboardMarkup(keyboard)
-
-
-# =========================
-# DATABASE ACTIONS
-# =========================
-
-def save_user(user_id, phone=None, invited_by=None):
-    conn = connect_db()
-    c = conn.cursor()
-
-    c.execute('''
-    INSERT OR IGNORE INTO users(user_id, invited_by)
-    VALUES(?, ?)
-    ''', (user_id, invited_by))
-
-    if phone:
-        c.execute('''
-        UPDATE users
-        SET phone=?, verified=1
-        WHERE user_id=?
-        ''', (phone, user_id))
-
-    conn.commit()
-    conn.close()
-
-
-
-def add_referral(inviter_id):
-    conn = connect_db()
-    c = conn.cursor()
-
-    c.execute('''
-    UPDATE users
-    SET referrals = referrals + 1
-    WHERE user_id=?
-    ''', (inviter_id,))
-
-    conn.commit()
-    conn.close()
-
-
-
-def get_referrals(user_id):
-    conn = connect_db()
-    c = conn.cursor()
-
-    c.execute("SELECT referrals FROM users WHERE user_id=?", (user_id,))
-    row = c.fetchone()
-
-    conn.close()
-
-    if row:
-        return row[0]
-
-    return 0
-
-
-
-def save_order(user_id, volume, duration, amount):
-    tracking_code = generate_tracking_code()
-
-    conn = connect_db()
-    c = conn.cursor()
-
-    c.execute('''
-    INSERT INTO orders(
-        user_id,
-        volume,
-        duration,
-        tracking_code,
-        amount
-    )
-    VALUES(?,?,?,?,?)
-    ''', (user_id, volume, duration, tracking_code, amount))
-
-    conn.commit()
-    conn.close()
-
-    return tracking_code
-
-
-
-def save_screenshot(user_id, file_id):
-    conn = connect_db()
-    c = conn.cursor()
-
-    c.execute('''
-    UPDATE orders
-    SET screenshot=?
-    WHERE id=(
-        SELECT id FROM orders
-        WHERE user_id=?
-        ORDER BY id DESC
-        LIMIT 1
-    )
-    ''', (file_id, user_id))
-
-    conn.commit()
-    conn.close()
-
-
-
-def get_orders():
-    conn = connect_db()
-    c = conn.cursor()
-
-    c.execute("SELECT * FROM orders ORDER BY id DESC")
-    rows = c.fetchall()
-
-    conn.close()
-
-    return rows
-
-
-
-def update_order(order_id, status, config=None):
-    conn = connect_db()
-    c = conn.cursor()
-
-    c.execute('''
-    UPDATE orders
-    SET payment_status=?, config=?
-    WHERE id=?
-    ''', (status, config, order_id))
-
-    conn.commit()
-    conn.close()
-
-
-# =========================
-# START
-# =========================
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-
-    invited_by = None
-
-    if context.args:
-        try:
-            invited_by = int(context.args[0])
-        except:
-            pass
-
-    save_user(user.id, invited_by=invited_by)
-
-    if not await check_access(update):
-        return
-
-    await update.message.reply_text(
-        "🌟 به ربات فروش VPN خوش اومدی",
-        reply_markup=main_menu()
-    )
-
-
-# =========================
-# CONTACT VERIFY
-# =========================
-
-async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    contact = update.message.contact
-    user_id = update.effective_user.id
-
-    if contact.user_id != user_id:
-        await update.message.reply_text("❌ فقط شماره خودت را ارسال کن")
-        return
-
-    save_user(user_id, phone=contact.phone_number)
-
-    conn = connect_db()
-    c = conn.cursor()
-
-    c.execute("SELECT invited_by FROM users WHERE user_id=?", (user_id,))
-    row = c.fetchone()
-
-    conn.close()
-
-    if row and row[0]:
-        add_referral(row[0])
-
-    await update.message.reply_text(
-        "✅ شماره تایید شد. حالا میتونی از ربات استفاده کنی.",
-        reply_markup=ReplyKeyboardRemove()
-    )
-
-    await update.message.reply_text(
-        "🏠 منوی اصلی",
-        reply_markup=main_menu()
-    )
-
-
-# =========================
-# BUTTONS
-# =========================
-
-async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    user_id = query.from_user.id
-
-    if query.data == "check_join":
-        if await is_member(query.bot, user_id):
-            await query.message.reply_text(
-                "✅ عضو شدی. حالا شماره تلفنتو تایید کن."
-            )
-        else:
-            await query.answer("❌ هنوز عضو نشدی", show_alert=True)
-
-    elif query.data == "buy":
-        if not await is_member(query.bot, user_id):
-            await query.message.reply_text("❌ ابتدا عضو کانال شوید")
-            return
-
-        await query.message.reply_text("📦 حجم را انتخاب کن",
-            reply_markup=volume_menu()
-        )
-
-    elif query.data.startswith("vol_"):
-        context.user_data['volume'] = query.data.replace("vol_", "")
-
-        await query.message.reply_text(
-            "⏰ زمان را انتخاب کن",
-            reply_markup=duration_menu()
-        )
-
-    elif query.data.startswith("dur_"):
-        duration = query.data.replace("dur_", "")
-        volume = context.user_data.get("volume")
-
-        amount = generate_random_amount()
-
-        tracking = save_order(
-            user_id,
-            volume,
-            duration,
-            amount
-        )
-
-        text = f'''
-✅ سفارش ثبت شد
-
-🔢 کد پیگیری:
-{tracking}
-
-💳 شماره کارت:
-{CARD_NUMBER}
-
-💰 مبلغ دقیق:
 {amount}
 
-⚠️ دقیقا همین مبلغ را واریز کن.
-سپس اسکرین شات را همینجا ارسال کن.
-'''
-
-        await query.message.reply_text(text)
-
-    elif query.data == "track":
-        context.user_data['awaiting_tracking'] = True
-
-        await query.message.reply_text(
-            "🔎 کد پیگیری سفارش را ارسال کن"
-        )
-
-    elif query.data == "admin_panel":
-        keyboard = [
-            [InlineKeyboardButton("📦 سفارشات", callback_data="admin_orders")]
-        ]
-
-        await query.message.reply_text(
-            "🎛 پنل مدیریت",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-
-    elif query.data == "free_test":
-        referrals = get_referrals(user_id)
-
-        referral_link = f"https://t.me/{context.bot.username}?start={user_id}"
-
-        text = f'''
-🎁 دریافت تست رایگان 50MB
-
-برای دریافت تست رایگان باید حداقل 10 نفر را با لینک اختصاصی خودت وارد ربات کنی.
-
-⚠️ کاربران باید:
-- عضو کانال شوند
-- شماره خود را تایید کنند
-- کامل وارد ربات شوند
-
-👥 تعداد رفرال فعلی: {referrals}/10
-
-🔗 لینک دعوت اختصاصی:
-{referral_link}
-'''
-
-        if referrals >= 10:
-            text += "\n\n✅ تبریک! تست رایگان فعال شد."
-
-        await query.message.reply_text(text)
-
-    elif query.data == "admin_orders":
-        if user_id != ADMIN_ID:
-            return
-
-        orders = get_orders()
-
-        if not orders:
-            await query.message.reply_text("سفارشی وجود ندارد")
-            return
-
-        for order in orders:
-            text = f'''
-🆔 سفارش: {order[0]}
-👤 کاربر: {order[1]}
-📦 حجم: {order[2]}
-⏰ زمان: {order[3]}
-💰 مبلغ: {order[5]}
-📊 وضعیت: {order[7]}
-'''
-
-            if order[6]:
-                await query.message.reply_photo(
-                    photo=order[6],
-                    caption=text,
-                    reply_markup=InlineKeyboardMarkup([
-                        [
-                            InlineKeyboardButton(
-                                "✅ تایید",
-                                callback_data=f"approve_{order[0]}"
-                            ),
-                            InlineKeyboardButton(
-                                "❌ رد",
-                                callback_data=f"reject_{order[0]}"
-                            )
-                        ]
-                    ])
-                )
-            else:
-                await query.message.reply_text(text)
-
-    elif query.data.startswith("approve_"):
-        if user_id != ADMIN_ID:
-            return
-
-        order_id = int(query.data.split("_")[1])
-
-        context.user_data['send_to_order'] = order_id
-        context.user_data['approve_mode'] = True
-
-        await query.message.reply_text(
-            "✍️ حالا پیام دلخواهت را بفرست تا برای کاربر ارسال شود.\n\nمثلا کانفیگ یا متن تایید"
-        )
-
-    elif query.data.startswith("reject_"):
-        if user_id != ADMIN_ID:
-            return
-
-        order_id = int(query.data.split("_")[1])
-
-        context.user_data['send_to_order'] = order_id
-        context.user_data['reject_mode'] = True
-
-        await query.message.reply_text(
-            "✍️ متن رد سفارش را ارسال کن"
-        )
-
-
-# =========================
-# ADMIN PANEL
-# =========================
-
-async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("❌ دسترسی نداری")
-        return
-
-    keyboard = [
-        [InlineKeyboardButton("📦 سفارشات", callback_data="admin_orders")]
-    ]
-
-    await update.message.reply_text(
-        "🎛 پنل مدیریت",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
-
-
-# =========================
-# MESSAGE HANDLER
-# =========================
-
-async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-
-    if update.message.photo:
-        photo = update.message.photo[-1].file_id
-
-        save_screenshot(user_id, photo)
-
-        await update.message.reply_text(
-            "✅ اسکرین شات ثبت شد. منتظر تایید ادمین باشید."
-        )
-
-        await context.bot.send_photo(
-            ADMIN_ID,
-            photo=photo,
-            caption=f"📥 اسکرین شات جدید از کاربر {user_id}"
-        )
-
-        return
-
-    if user_id == ADMIN_ID:
-
-        if context.user_data.get('approve_mode'):
-            order_id = context.user_data['send_to_order']
-
-            conn = connect_db()
-            c = conn.cursor()
-
-            c.execute("SELECT user_id FROM orders WHERE id=?", (order_id,))
-            row = c.fetchone()
-
-            conn.close()
-
-            if row:
-                target_user = row[0]
-
-                update_order(order_id, "approved", update.message.text)
-
-                await context.bot.send_message(
-                    target_user,
-                    f"✅ سفارش شما تایید شد\n\n{update.message.text}"
-                )
-
-                await update.message.reply_text("✅ ارسال شد")
-
-            context.user_data['approve_mode'] = False
-
-        elif context.user_data.get('reject_mode'):
-            order_id = context.user_data['send_to_order']
-
-            conn = connect_db()
-            c = conn.cursor()
-
-            c.execute("SELECT user_id FROM orders WHERE id=?", (order_id,))
-            row = c.fetchone()
-
-            conn.close()
-
-            if row:
-                target_user = row[0]
-
-                update_order(order_id, "rejected")
-
-                await context.bot.send_message(
-                    target_user,
-                    f"❌ سفارش شما رد شد\n\n{update.message.text}"
-                )
-
-                await update.message.reply_text("❌ پیام رد ارسال شد")
-
-            context.user_data['reject_mode'] = False
-
-
-# =========================
-# MAIN
-# =========================
-
-
-async def main():
-    app = (
-        Application.builder()
-        .token(TOKEN)
-        .concurrent_updates(True)
-        .build()
-    )
-
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("admin", admin))
-
-    app.add_handler(CallbackQueryHandler(buttons))
-
-    app.add_handler(MessageHandler(filters.CONTACT, contact_handler))
-
-    app.add_handler(MessageHandler(filters.PHOTO, messages))
-
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, messages))
-
-    print("BOT STARTED")
-
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling(drop_pending_updates=True)
-
-    while True:
-        await asyncio.sleep(3600)
-
-
-if __name__ == "__main__":
-    asyncio.run(main())
-SAMPLE_CONFIG = "vmess://your-config"
-
-import sqlite3
-import random
-import string
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
-    KeyboardButton,
-    ReplyKeyboardMarkup
-)
-
-from telegram.ext import (
-    Application,
-    CommandHandler,
-    CallbackQueryHandler,
-    MessageHandler,
-    ContextTypes,
-    filters
-)
-
-TOKEN = "7656448308:AAEPkCNpBtiiw70r-pKuFPdWo6StZnBTeEE"
-ADMIN_PASSWORD = "1390"
-ADMIN_ID = 123456789
-FORCE_CHANNEL = "@h4x_top"
-CARD_NUMBER = "6037991234567890"
-
-
-# =========================
-# DATABASE
-# =========================
-
-def init_db():
-    conn = sqlite3.connect("bot.db")
-    c = conn.cursor()
-
-    c.execute('''
-    CREATE TABLE IF NOT EXISTS users (
-        user_id INTEGER PRIMARY KEY,
-        phone TEXT,
-        invited_by INTEGER,
-        referrals INTEGER DEFAULT 0,
-        verified INTEGER DEFAULT 0,
-        banned INTEGER DEFAULT 0
-    )
-    ''')
-
-    c.execute('''
-    CREATE TABLE IF NOT EXISTS orders (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        user_id INTEGER,
-        volume TEXT,
-        duration TEXT,
-        tracking_code TEXT,
-        amount TEXT,
-        screenshot TEXT,
-        payment_status TEXT DEFAULT 'pending',
-        config TEXT
-    )
-    ''')
-
-    conn.commit()
-    conn.close()
-
-
-init_db()
-
-
-# =========================
-# HELPERS
-# =========================
-
-def connect_db():
-    return sqlite3.connect("bot.db")
-
-
-def generate_tracking_code():
-    return ''.join(random.choices(string.ascii_uppercase + string.digits, k=10))
-
-
-def generate_random_amount():
-    base = 150000
-    random_part = random.randint(1000, 9999)
-    return f"{base}.{random_part}"
-
-
-async def is_member(bot, user_id):
-    try:
-        member = await bot.get_chat_member(FORCE_CHANNEL, user_id)
-        return member.status in ['member', 'administrator', 'creator']
-    except:
-        return False
-
-
-async def check_access(update: Update):
-    user_id = update.effective_user.id
-
-    if not await is_member(update.get_bot(), user_id):
-        keyboard = [
-            [InlineKeyboardButton("📢 عضویت در کانال", url=f"https://t.me/{FORCE_CHANNEL.replace('@', '')}")],
-            [InlineKeyboardButton("✅ بررسی عضویت", callback_data="check_join")]
-        ]
-
-        await update.effective_message.reply_text(
-            "🚫 برای استفاده از ربات باید ابتدا عضو کانال شوید.",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
-
-        return False
-
-    conn = connect_db()
-    c = conn.cursor()
-
-    c.execute("SELECT verified FROM users WHERE user_id=?", (user_id,))
-    row = c.fetchone()
-
-    conn.close()
-
-    if not row or row[0] == 0:
-        button = KeyboardButton("📱 تایید شماره", request_contact=True)
-
-        await update.effective_message.reply_text(
-            "📱 برای ادامه باید شماره تلفن خود را تایید کنید.",
-            reply_markup=ReplyKeyboardMarkup([[button]], resize_keyboard=True, one_time_keyboard=True)
-        )
-
-        return False
-
-    return True
-
-
-# =========================
-# MENUS
-# =========================
-
-def main_menu():
-    keyboard = [
-        [InlineKeyboardButton("📦 خرید سرویس", callback_data="buy")],
-        [InlineKeyboardButton("🎁 تست رایگان", callback_data="free_test")],
-        [InlineKeyboardButton("📊 پیگیری سفارش", callback_data="track")]
-    ]
-
-    return InlineKeyboardMarkup(keyboard)
-
-
-
-def volume_menu():
-    keyboard = [
-        [InlineKeyboardButton("10GB", callback_data="vol_10")],
-        [InlineKeyboardButton("50GB", callback_data="vol_50")],
-        [InlineKeyboardButton("100GB", callback_data="vol_100")],
-        [InlineKeyboardButton("Unlimited", callback_data="vol_unlimited")]
-    ]
-
-    return InlineKeyboardMarkup(keyboard)
-
-
-
-def duration_menu():
-    keyboard = [
-        [InlineKeyboardButton("1 Week", callback_data="dur_1week")],
-        [InlineKeyboardButton("1 Month", callback_data="dur_1month")],
-        [InlineKeyboardButton("1 Year", callback_data="dur_1year")],
-        [InlineKeyboardButton("Permanent", callback_data="dur_perm")]
-    ]
-
-    return InlineKeyboardMarkup(keyboard)
-
-
-# =========================
-# DATABASE ACTIONS
-# =========================
-
-def save_user(user_id, phone=None, invited_by=None):
-    conn = connect_db()
-    c = conn.cursor()
-
-    c.execute('''
-    INSERT OR IGNORE INTO users(user_id, invited_by)
-    VALUES(?, ?)
-    ''', (user_id, invited_by))
-
-    if phone:
-        c.execute('''
-        UPDATE users
-        SET phone=?, verified=1
-        WHERE user_id=?
-        ''', (phone, user_id))
-
-    conn.commit()
-    conn.close()
-
-
-
-def add_referral(inviter_id):
-    conn = connect_db()
-    c = conn.cursor()
-
-    c.execute('''
-    UPDATE users
-    SET referrals = referrals + 1
-    WHERE user_id=?
-    ''', (inviter_id,))
-
-    conn.commit()
-    conn.close()
-
-
-
-def get_referrals(user_id):
-    conn = connect_db()
-    c = conn.cursor()
-
-    c.execute("SELECT referrals FROM users WHERE user_id=?", (user_id,))
-    row = c.fetchone()
-
-    conn.close()
-
-    if row:
-        return row[0]
-
-    return 0
-
-
-
-def save_order(user_id, volume, duration, amount):
-    tracking_code = generate_tracking_code()
-
-    conn = connect_db()
-    c = conn.cursor()
-
-    c.execute('''
-    INSERT INTO orders(
-        user_id,
-        volume,
-        duration,
-        tracking_code,
-        amount
-    )
-    VALUES(?,?,?,?,?)
-    ''', (user_id, volume, duration, tracking_code, amount))
-
-    conn.commit()
-    conn.close()
-
-    return tracking_code
-
-
-
-def save_screenshot(user_id, file_id):
-    conn = connect_db()
-    c = conn.cursor()
-
-    c.execute('''
-    UPDATE orders
-    SET screenshot=?
-    WHERE id=(
-        SELECT id FROM orders
-        WHERE user_id=?
-        ORDER BY id DESC
-        LIMIT 1
-    )
-    ''', (file_id, user_id))
-
-    conn.commit()
-    conn.close()
-
-
-
-def get_orders():
-    conn = connect_db()
-    c = conn.cursor()
-
-    c.execute("SELECT * FROM orders ORDER BY id DESC")
-    rows = c.fetchall()
-
-    conn.close()
-
-    return rows
-
-
-
-def update_order(order_id, status, config=None):
-    conn = connect_db()
-    c = conn.cursor()
-
-    c.execute('''
-    UPDATE orders
-    SET payment_status=?, config=?
-    WHERE id=?
-    ''', (status, config, order_id))
-
-    conn.commit()
-    conn.close()
-
-
-# =========================
-# START
-# =========================
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user = update.effective_user
-
-    invited_by = None
-
-    if context.args:
-        try:
-            invited_by = int(context.args[0])
-        except:
-            pass
-
-    save_user(user.id, invited_by=invited_by)
-
-    if not await check_access(update):
-        return
-
-    await update.message.reply_text(
-        "🌟 به ربات فروش VPN خوش اومدی",
-        reply_markup=main_menu()
-    )
-
-
-# =========================
-# CONTACT VERIFY
-# =========================
-
-async def contact_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    contact = update.message.contact
-    user_id = update.effective_user.id
-
-    if contact.user_id != user_id:
-        await update.message.reply_text("❌ فقط شماره خودت را ارسال کن")
-        return
-
-    save_user(user_id, phone=contact.phone_number)
-
-    conn = connect_db()
-    c = conn.cursor()
-
-    c.execute("SELECT invited_by FROM users WHERE user_id=?", (user_id,))
-    row = c.fetchone()
-
-    conn.close()
-
-    if row and row[0]:
-        add_referral(row[0])
-
-    await update.message.reply_text(
-        "✅ شماره تایید شد. حالا میتونی از ربات استفاده کنی.",
-        reply_markup=main_menu()
-    )
-
-
-# =========================
-# BUTTONS
-# =========================
-
-async def buttons(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    user_id = query.from_user.id
-
-    if query.data == "check_join":
-        if await is_member(query.bot, user_id):
-            await query.message.reply_text(
-                "✅ عضو شدی. حالا شماره تلفنتو تایید کن."
-            )
-        else:
-            await query.answer("❌ هنوز عضو نشدی", show_alert=True)
-
-    elif query.data == "buy":
-        if not await is_member(query.bot, user_id):
-            await query.message.reply_text("❌ ابتدا عضو کانال شوید")
-            return
-
-        await query.message.reply_text("📦 حجم را انتخاب کن",
-            reply_markup=volume_menu()
-        )
-
-    elif query.data.startswith("vol_"):
-        context.user_data['volume'] = query.data.replace("vol_", "")
-
-        await query.message.reply_text(
-            "⏰ زمان را انتخاب کن",
-            reply_markup=duration_menu()
-        )
-
-    elif query.data.startswith("dur_"):
-        duration = query.data.replace("dur_", "")
-        volume = context.user_data.get("volume")
-
-        amount = generate_random_amount()
-
-        tracking = save_order(
-            user_id,
-            volume,
-            duration,
-            amount
-        )
-
-        text = f'''
-✅ سفارش ثبت شد
-
-🔢 کد پیگیری:
-{tracking}
-
-💳 شماره کارت:
+شماره کارت:
 {CARD_NUMBER}
 
-💰 مبلغ دقیق:
-{amount}
+به نام:
+{CARD_OWNER}
 
-⚠️ دقیقا همین مبلغ را واریز کن.
-سپس اسکرین شات را همینجا ارسال کن.
-'''
-
-        await query.message.reply_text(text)
-
-    elif query.data == "free_test":
-        referrals = get_referrals(user_id)
-
-        referral_link = f"https://t.me/{context.bot.username}?start={user_id}"
-
-        text = f'''
-🎁 دریافت تست رایگان 50MB
-
-برای دریافت تست رایگان باید حداقل 10 نفر را با لینک اختصاصی خودت وارد ربات کنی.
-
-⚠️ کاربران باید:
-- عضو کانال شوند
-- شماره خود را تایید کنند
-- کامل وارد ربات شوند
-
-👥 تعداد رفرال فعلی: {referrals}/10
-
-🔗 لینک دعوت اختصاصی:
-{referral_link}
-'''
-
-        if referrals >= 10:
-            text += "\n\n✅ تبریک! تست رایگان فعال شد."
-
-        await query.message.reply_text(text)
-
-    elif query.data == "admin_orders":
-        if user_id != ADMIN_ID:
-            return
-
-        orders = get_orders()
-
-        if not orders:
-            await query.message.reply_text("سفارشی وجود ندارد")
-            return
-
-        for order in orders:
-            text = f'''
-🆔 سفارش: {order[0]}
-👤 کاربر: {order[1]}
-📦 حجم: {order[2]}
-⏰ زمان: {order[3]}
-💰 مبلغ: {order[5]}
-📊 وضعیت: {order[7]}
-'''
-
-            if order[6]:
-                await query.message.reply_photo(
-                    photo=order[6],
-                    caption=text,
-                    reply_markup=InlineKeyboardMarkup([
-                        [
-                            InlineKeyboardButton(
-                                "✅ تایید",
-                                callback_data=f"approve_{order[0]}"
-                            ),
-                            InlineKeyboardButton(
-                                "❌ رد",
-                                callback_data=f"reject_{order[0]}"
-                            )
-                        ]
-                    ])
-                )
-            else:
-                await query.message.reply_text(text)
-
-    elif query.data.startswith("approve_"):
-        if user_id != ADMIN_ID:
-            return
-
-        order_id = int(query.data.split("_")[1])
-
-        context.user_data['send_to_order'] = order_id
-        context.user_data['approve_mode'] = True
-
-        await query.message.reply_text(
-            "✍️ حالا پیام دلخواهت را بفرست تا برای کاربر ارسال شود.\n\nمثلا کانفیگ یا متن تایید"
-        )
-
-    elif query.data.startswith("reject_"):
-        if user_id != ADMIN_ID:
-            return
-
-        order_id = int(query.data.split("_")[1])
-
-        context.user_data['send_to_order'] = order_id
-        context.user_data['reject_mode'] = True
-
-        await query.message.reply_text(
-            "✍️ متن رد سفارش را ارسال کن"
+سپس عکس فیش را ارسال کنید
+"""
         )
 
 
-# =========================
-# ADMIN PANEL
-# =========================
+# ---------------- RECEIPT ----------------
 
-async def admin(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if update.effective_user.id != ADMIN_ID:
-        await update.message.reply_text("❌ دسترسی نداری")
+
+@app.on_message(filters.photo)
+async def receipt(client, message):
+    user_id = message.from_user.id
+
+    if user_id not in user_steps:
         return
 
-    keyboard = [
-        [InlineKeyboardButton("📦 سفارشات", callback_data="admin_orders")]
-    ]
+    if user_steps[user_id]["step"] != "receipt":
+        return
 
-    await update.message.reply_text(
-        "🎛 پنل مدیریت",
-        reply_markup=InlineKeyboardMarkup(keyboard)
+    file_id = message.photo.file_id
+
+    volume = user_steps[user_id]["volume"]
+    duration = user_steps[user_id]["duration"]
+    amount = user_steps[user_id]["amount"]
+
+    c.execute(
+        "INSERT INTO orders(user_id, volume, duration, amount, receipt_file_id) VALUES(?,?,?,?,?)",
+        (user_id, volume, duration, amount, file_id)
+    )
+    conn.commit()
+
+    del user_steps[user_id]
+
+    await message.reply(
+        "فیش شما ثبت شد و منتظر تایید مدیریت است"
     )
 
 
-# =========================
-# MESSAGE HANDLER
-# =========================
+# ---------------- ADMIN ----------------
 
-async def messages(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
 
-    if update.message.photo:
-        photo = update.message.photo[-1].file_id
+@app.on_message(filters.command("admin"))
+async def admin(client, message):
+    user_id = message.from_user.id
 
-        save_screenshot(user_id, photo)
+    args = message.text.split()
 
-        await update.message.reply_text(
-            "✅ اسکرین شات ثبت شد. منتظر تایید ادمین باشید."
-        )
-
-        await context.bot.send_photo(
-            ADMIN_ID,
-            photo=photo,
-            caption=f"📥 اسکرین شات جدید از کاربر {user_id}"
-        )
-
+    if len(args) < 2:
+        await message.reply("رمز را وارد کنید")
         return
 
-    if user_id == ADMIN_ID:
+    if args[1] == ADMIN_PASSWORD:
+        admin_mode[user_id] = True
 
-        if context.user_data.get('approve_mode'):
-            order_id = context.user_data['send_to_order']
-
-            conn = connect_db()
-            c = conn.cursor()
-
-            c.execute("SELECT user_id FROM orders WHERE id=?", (order_id,))
-            row = c.fetchone()
-
-            conn.close()
-
-            if row:
-                target_user = row[0]
-
-                update_order(order_id, "approved", update.message.text)
-
-                await context.bot.send_message(
-                    target_user,
-                    f"✅ سفارش شما تایید شد\n\n{update.message.text}"
-                )
-
-                await update.message.reply_text("✅ ارسال شد")
-
-            context.user_data['approve_mode'] = False
-
-        elif context.user_data.get('reject_mode'):
-            order_id = context.user_data['send_to_order']
-
-            conn = connect_db()
-            c = conn.cursor()
-
-            c.execute("SELECT user_id FROM orders WHERE id=?", (order_id,))
-            row = c.fetchone()
-
-            conn.close()
-
-            if row:
-                target_user = row[0]
-
-                update_order(order_id, "rejected")
-
-                await context.bot.send_message(
-                    target_user,
-                    f"❌ سفارش شما رد شد\n\n{update.message.text}"
-                )
-
-                await update.message.reply_text("❌ پیام رد ارسال شد")
-
-            context.user_data['reject_mode'] = False
+        await message.reply(
+            "پنل مدیریت فعال شد\n\n/orders\n/ban ID\n/unban ID"
+        )
+    else:
+        await message.reply("رمز اشتباه است")
 
 
-# =========================
-# MAIN
-# =========================
+# ---------------- CALLBACKS ----------------
 
 
-async def main():
-    app = (
-        Application.builder()
-        .token(TOKEN)
-        .concurrent_updates(True)
-        .build()
-    )
+@app.on_callback_query()
+async def callbacks(client, callback_query):
+    data = callback_query.data
 
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(CommandHandler("admin", admin))
+    admin_id = callback_query.from_user.id
 
-    app.add_handler(CallbackQueryHandler(buttons))
+    if not is_admin(admin_id):
+        return
 
-    app.add_handler(MessageHandler(filters.CONTACT, contact_handler))
+    if data.startswith("approve_"):
+        oid = int(data.split("_")[1])
 
-    app.add_handler(MessageHandler(filters.PHOTO, messages))
+        c.execute("UPDATE orders SET status='approved' WHERE id=?", (oid,))
+        conn.commit()
 
-    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, messages))
+        c.execute("SELECT user_id FROM orders WHERE id=?", (oid,))
+        uid = c.fetchone()[0]
 
-    print("BOT STARTED")
+        admin_mode[f"send_{admin_id}"] = uid
 
-    await app.initialize()
-    await app.start()
-    await app.updater.start_polling(drop_pending_updates=True)
+        await callback_query.message.reply(
+            "پیام تایید + کانفیگ را ارسال کنید"
+        )
 
-    while True:
-        await asyncio.sleep(3600)
+    elif data.startswith("reject_"):
+        oid = int(data.split("_")[1])
+
+        c.execute("UPDATE orders SET status='rejected' WHERE id=?", (oid,))
+        conn.commit()
+
+        c.execute("SELECT user_id FROM orders WHERE id=?", (oid,))
+        uid = c.fetchone()[0]
+
+        admin_mode[f"send_{admin_id}"] = uid
+
+        await callback_query.message.reply(
+            "پیام رد سفارش را ارسال کنید"
+        )
 
 
-if __name__ == "__main__":
-    asyncio.run(main())
+@app.on_message(filters.text & filters.private)
+async def admin_sender(client, message):
+    admin_id = message.from_user.id
+
+    key = f"send_{admin_id}"
+
+    if key not in admin_mode:
+        return
+
+    uid = admin_mode[key]
+
+    try:
+        await app.send_message(uid, message.text)
+        await message.reply("ارسال شد")
+    except:
+        await message.reply("خطا در ارسال")
+
+    del admin_mode[key]
+
+
+print("BOT STARTED")
+app.run()
